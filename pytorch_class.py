@@ -13,8 +13,12 @@ import skimage.io as skio
 import torch
 from torch.utils.data import Dataset
 import cv2
-root_path = "/kaggle/input/beyond-visible-spectrum-ai-for-agriculture-2026p2"
+import pytorch_lightning as pl
+from torch.utils.data import DataLoader, random_split
+from matplotlib.figure import Figure
+from typing import Optional, Callable, Union
 
+### DATASET
 class S2Disease(Dataset):
     def __init__(self, root_dir, is_eval=False, transform=None):
         """
@@ -36,20 +40,21 @@ class S2Disease(Dataset):
         self.band_to_idx = {name: i for i, name in enumerate(self.bands)}
         
         if is_eval:
-            # Only point to the evaluation subfolder
             self.samples = list((self.root_dir / "evaluation").glob("*/"))
-            self.classes = []
-            self.class_to_idx = {}
+            # We still need the class list to know the vector size for one-hot encoding
+            # assuming the structure is consistent. 
+            # Ideally, pass the class list from the training set.
+            self.classes = ['Aphid', 'Blast', 'RPH', 'Rust'] 
+            self.class_to_idx = {cls: i for i, cls in enumerate(self.classes)}
         else:
-            # Get all subdirectories except 'evaluation'
             all_dirs = [d for d in self.root_dir.iterdir() if d.is_dir()]
             self.classes = sorted([d.name for d in all_dirs if d.name != "evaluation"])
             self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
-            
-            # Collect all sample folders from the disease classes
             self.samples = []
             for cls in self.classes:
                 self.samples.extend(list((self.root_dir / cls).glob("*/")))
+                
+        self.num_classes = len(self.classes)
 
     def __len__(self):
         return len(self.samples)
@@ -79,14 +84,18 @@ class S2Disease(Dataset):
         
         # Determine Label
         if self.is_eval:
-            label = -1 # Evaluation data typically has no visible label in folder structure
+            # For evaluation, return a dummy zero vector of the same shape
+            one_hot_label = torch.zeros(self.num_classes)
         else:
             class_name = sample_path.parent.name
-            label = self.class_to_idx[class_name]
+            label_idx = self.class_to_idx[class_name]
+            # Create one-hot vector: [1, 0, 0, 0]
+            one_hot_label = torch.zeros(self.num_classes)
+            one_hot_label[label_idx] = 1.0
         
         sample = {
             'image': torch.from_numpy(image),
-            'label': label,
+            'label': one_hot_label,
             'sample_id': sample_path.name # Useful for Kaggle submission tracking
         }
 
@@ -137,3 +146,99 @@ class S2Disease(Dataset):
                 plt.suptitle(f"Class: {class_name} | ID: {sample['sample_id']}")
     
             return fig
+
+
+
+### datamodule
+class S2DiseaseDataModule(pl.LightningDataModule):
+    def __init__(
+        self,
+        root_dir: str,
+        batch_size: int = 16,
+        num_workers: int = 4,
+        train_val_test_split: tuple[float, float, float] = (0.8, 0.1, 0.1),
+        transforms: Optional[Callable] = None,
+        seed: int = 42,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+        self.root_dir = root_dir
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.train_val_test_split = train_val_test_split
+        self.transforms = transforms
+        self.seed = seed
+
+        # Datasets placeholders
+        self.train_dataset = None
+        self.val_dataset = None
+        self.test_dataset = None
+        self.predict_dataset = None
+
+    def setup(self, stage: Optional[str] = None):
+        """Set up datasets based on the stage (fit, test, predict)."""
+
+        if stage == "fit" or stage == "test" or stage is None:
+            # Load the main labeled dataset (Aphid, Blast, RPH, Rust)
+            full_dataset = S2Disease(
+                root_dir=self.root_dir,
+                is_eval=False,
+                transform=self.transforms
+            )
+
+            # Split logic
+            total_size = len(full_dataset)
+            train_size = int(self.train_val_test_split[0] * total_size)
+            val_size = int(self.train_val_test_split[1] * total_size)
+            test_size = total_size - train_size - val_size
+
+            generator = torch.Generator().manual_seed(self.seed)
+            self.train_dataset, self.val_dataset, self.test_dataset = random_split(
+                full_dataset,
+                [train_size, val_size, test_size],
+                generator=generator
+            )
+
+        if stage == "predict":
+            # Load from the 'evaluation' folder
+            self.predict_dataset = S2Disease(
+                root_dir=self.root_dir,
+                is_eval=True,
+                transform=self.transforms
+            )
+
+    def train_dataloader(self):
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )
+
+    def val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )
+
+    def test_dataloader(self):
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )
+
+    def predict_dataloader(self):
+        return DataLoader(
+            self.predict_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )

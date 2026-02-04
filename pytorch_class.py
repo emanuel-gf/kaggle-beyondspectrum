@@ -15,7 +15,6 @@ from torch.utils.data import Dataset
 import cv2
 root_path = "/kaggle/input/beyond-visible-spectrum-ai-for-agriculture-2026p2"
 
-
 class S2Disease(Dataset):
     def __init__(self, root_dir, is_eval=False, transform=None):
         """
@@ -33,6 +32,9 @@ class S2Disease(Dataset):
             'B7', 'B8', 'B8A', 'B9', 'B11', 'B12'
         ]
 
+        # Create a mapping from band name to index for plotting
+        self.band_to_idx = {name: i for i, name in enumerate(self.bands)}
+        
         if is_eval:
             # Only point to the evaluation subfolder
             self.samples = list((self.root_dir / "evaluation").glob("*/"))
@@ -92,3 +94,46 @@ class S2Disease(Dataset):
             sample['image'] = self.transform(sample['image'])
 
         return sample
+
+    def plot(self, 
+             sample: dict, 
+             bands: list[str] = ['B4', 'B3', 'B2'], 
+             figsize: tuple = (8, 8),
+             suptitle: str = None) -> Figure:
+            """
+            Plots chosen bands. If 3 bands provided, plots RGB. If 1, plots grayscale.
+            """
+            img_tensor = sample['image']
+            plot_data = []
+    
+            #index mapping
+            for b in bands:
+                idx = self.band_to_idx[b]
+                band_array = img_tensor[idx].numpy()
+                
+                # clip to the 2nd and 98th percentile
+                vmin, vmax = np.percentile(band_array, (2, 98))
+                band_array = np.clip((band_array - vmin) / (vmax - vmin + 1e-8), 0, 1)
+                plot_data.append(band_array)
+
+            fig, ax = plt.subplots(figsize=figsize)
+    
+            if len(bands) == 3:
+                # (H, W, 3) for RGB
+                rgb_img = np.stack(plot_data, axis=-1)
+                ax.imshow(rgb_img)
+                ax.set_title(f"RGB Composite: {bands}")
+            else:
+                # Plot single band (grayscale)
+                ax.imshow(plot_data[0], cmap='gray')
+                ax.set_title(f"Single Band: {bands[0]}")
+    
+            ax.axis('off')
+            
+            if suptitle:
+                plt.suptitle(suptitle)
+            elif not self.is_eval:
+                class_name = [k for k, v in self.class_to_idx.items() if v == sample['label']][0]
+                plt.suptitle(f"Class: {class_name} | ID: {sample['sample_id']}")
+    
+            return fig

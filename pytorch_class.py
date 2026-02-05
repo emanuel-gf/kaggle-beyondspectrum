@@ -142,7 +142,8 @@ class S2Disease(Dataset):
             if suptitle:
                 plt.suptitle(suptitle)
             elif not self.is_eval:
-                class_name = [k for k, v in self.class_to_idx.items() if v == sample['label']][0]
+                class_number = int(np.argmax(sample['label'].cpu().byte().numpy()))
+                class_name = self.idx_to_class[class_number]
                 plt.suptitle(f"Class: {class_name} | ID: {sample['sample_id']}")
     
             return fig
